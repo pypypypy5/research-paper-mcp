@@ -1,6 +1,8 @@
 import json
 import unittest
-from unittest.mock import patch
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import arxiv
 
@@ -38,53 +40,47 @@ class FakeSession:
 
 
 class PaperClientsAsyncTests(unittest.IsolatedAsyncioTestCase):
-    async def test_search_arxiv_papers_parses_atom_feed(self):
-        response = FakeResponse(
-            status=200,
-            text_data="""<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
-  <entry>
-    <id>http://arxiv.org/abs/1234.5678v1</id>
-    <updated>2024-02-03T04:05:06Z</updated>
-    <published>2024-01-02T03:04:05Z</published>
-    <title>
-      Test Paper
-    </title>
-    <summary>
-      Short abstract with extra whitespace.
-    </summary>
-    <author><name>Alice</name></author>
-    <author><name>Bob</name></author>
-    <link href="https://arxiv.org/pdf/1234.5678v1.pdf" rel="related" type="application/pdf" title="pdf" />
-    <category term="cs.AI" />
-    <category term="cs.LG" />
-    <arxiv:primary_category term="cs.AI" />
-  </entry>
-</feed>""",
-        )
-        session = FakeSession(response)
+    @patch("paper_clients.asyncio.to_thread", new_callable=AsyncMock)
+    async def test_search_arxiv_papers_uses_threaded_library_call(self, to_thread_mock):
+        to_thread_mock.return_value = [{"id": "1234.5678v1"}]
 
-        papers = await paper_clients.search_arxiv_papers(
+        papers = await paper_clients.search_arxiv_papers("agentic systems", 3, arxiv.SortCriterion.Relevance)
+
+        self.assertEqual(papers, [{"id": "1234.5678v1"}])
+        to_thread_mock.assert_awaited_once_with(
+            paper_clients._search_arxiv_sync,
             "agentic systems",
             3,
             arxiv.SortCriterion.Relevance,
-            session=session,
         )
+
+    @patch("paper_clients.arxiv.Search")
+    @patch("paper_clients._get_arxiv_client")
+    def test_search_arxiv_sync_serializes_results(self, get_client_mock, search_cls):
+        get_client_mock.return_value.results.return_value = [
+            SimpleNamespace(
+                entry_id="http://arxiv.org/abs/1234.5678v1",
+                title="Test Paper",
+                authors=[SimpleNamespace(name="Alice"), SimpleNamespace(name="Bob")],
+                summary="Short abstract",
+                pdf_url="https://arxiv.org/pdf/1234.5678v1.pdf",
+                published=datetime(2024, 1, 2, 3, 4, 5),
+                updated=datetime(2024, 2, 3, 4, 5, 6),
+                categories=["cs.AI", "cs.LG"],
+                primary_category="cs.AI",
+            )
+        ]
+
+        papers = paper_clients._search_arxiv_sync("agentic systems", 3, arxiv.SortCriterion.Relevance)
 
         self.assertEqual(len(papers), 1)
         self.assertEqual(papers[0]["id"], "1234.5678v1")
         self.assertEqual(papers[0]["authors"], ["Alice", "Bob"])
         self.assertEqual(papers[0]["primary_category"], "cs.AI")
-        self.assertEqual(session.calls[0]["url"], paper_clients.ARXIV_API_URL)
-        self.assertEqual(
-            session.calls[0]["params"],
-            {
-                "search_query": "agentic systems",
-                "start": 0,
-                "max_results": 3,
-                "sortBy": "relevance",
-                "sortOrder": "descending",
-            },
+        search_cls.assert_called_once_with(
+            query="agentic systems",
+            max_results=3,
+            sort_by=arxiv.SortCriterion.Relevance,
         )
 
     async def test_search_semantic_scholar_papers_returns_data(self):

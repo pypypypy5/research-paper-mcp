@@ -1,9 +1,6 @@
 import asyncio
 import json
 import os
-import re
-import time
-import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import quote
 
@@ -15,7 +12,6 @@ from env_loader import load_env_file
 load_env_file()
 
 
-ARXIV_API_URL = "https://export.arxiv.org/api/query"
 SEMANTIC_SCHOLAR_BASE_URL = "https://api.semanticscholar.org/graph/v1"
 DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5, sock_connect=5, sock_read=15)
 DEFAULT_MAX_RETRIES = int(os.environ.get("RESEARCH_PAPER_HTTP_MAX_RETRIES", "3"))
@@ -25,12 +21,8 @@ DEFAULT_HEADERS = {
     "User-Agent": "research-paper-mcp/1.0 (+https://modelcontextprotocol.io)",
     "Accept": "application/json, application/atom+xml, text/xml",
 }
-ARXIV_NAMESPACES = {
-    "atom": "http://www.w3.org/2005/Atom",
-    "arxiv": "http://arxiv.org/schemas/atom",
-}
-_arxiv_rate_limit_lock = asyncio.Lock()
-_last_arxiv_request_started_at = 0.0
+_arxiv_client_lock = asyncio.Lock()
+_arxiv_client: Optional[arxiv.Client] = None
 
 
 def _build_headers() -> Dict[str, str]:
@@ -41,65 +33,38 @@ def _build_headers() -> Dict[str, str]:
     return headers
 
 
-def _collapse_whitespace(value: Optional[str]) -> str:
-    return re.sub(r"\s+", " ", value or "").strip()
-
-
-def _normalize_arxiv_sort(sort_by: Any) -> str:
-    sort_map = {
-        arxiv.SortCriterion.Relevance: "relevance",
-        arxiv.SortCriterion.LastUpdatedDate: "lastUpdatedDate",
-        arxiv.SortCriterion.SubmittedDate: "submittedDate",
-        "relevance": "relevance",
-        "lastUpdatedDate": "lastUpdatedDate",
-        "submittedDate": "submittedDate",
+def _serialize_arxiv_result(result: Any) -> Dict[str, Any]:
+    return {
+        "id": result.entry_id.split("/")[-1],
+        "title": result.title,
+        "authors": [author.name for author in result.authors],
+        "abstract": result.summary,
+        "pdf_url": result.pdf_url,
+        "published": result.published.isoformat() if result.published else None,
+        "updated": result.updated.isoformat() if result.updated else None,
+        "categories": result.categories,
+        "primary_category": result.primary_category,
     }
-    return sort_map.get(sort_by, "relevance")
 
 
-def _parse_arxiv_feed(feed_text: str) -> List[Dict[str, Any]]:
-    root = ET.fromstring(feed_text)
-    papers = []
-    for entry in root.findall("atom:entry", ARXIV_NAMESPACES):
-        entry_id = _collapse_whitespace(entry.findtext("atom:id", default="", namespaces=ARXIV_NAMESPACES))
-        pdf_url = None
-        for link in entry.findall("atom:link", ARXIV_NAMESPACES):
-            if link.attrib.get("title") == "pdf" or link.attrib.get("type") == "application/pdf":
-                pdf_url = link.attrib.get("href")
-                break
-
-        papers.append(
-            {
-                "id": entry_id.split("/")[-1],
-                "title": _collapse_whitespace(entry.findtext("atom:title", default="", namespaces=ARXIV_NAMESPACES)),
-                "authors": [
-                    _collapse_whitespace(author.text)
-                    for author in entry.findall("atom:author/atom:name", ARXIV_NAMESPACES)
-                    if _collapse_whitespace(author.text)
-                ],
-                "abstract": _collapse_whitespace(entry.findtext("atom:summary", default="", namespaces=ARXIV_NAMESPACES)),
-                "pdf_url": pdf_url,
-                "published": _collapse_whitespace(entry.findtext("atom:published", default="", namespaces=ARXIV_NAMESPACES)) or None,
-                "updated": _collapse_whitespace(entry.findtext("atom:updated", default="", namespaces=ARXIV_NAMESPACES)) or None,
-                "categories": [category.attrib.get("term") for category in entry.findall("atom:category", ARXIV_NAMESPACES)],
-                "primary_category": (
-                    entry.find("arxiv:primary_category", ARXIV_NAMESPACES).attrib.get("term")
-                    if entry.find("arxiv:primary_category", ARXIV_NAMESPACES) is not None
-                    else None
-                ),
-            }
+def _get_arxiv_client() -> arxiv.Client:
+    global _arxiv_client
+    if _arxiv_client is None:
+        _arxiv_client = arxiv.Client(
+            page_size=100,
+            delay_seconds=ARXIV_MIN_INTERVAL_SECONDS,
+            num_retries=DEFAULT_MAX_RETRIES,
         )
-    return papers
+    return _arxiv_client
 
 
-async def _throttle_arxiv() -> None:
-    global _last_arxiv_request_started_at
-
-    async with _arxiv_rate_limit_lock:
-        delay = ARXIV_MIN_INTERVAL_SECONDS - (time.monotonic() - _last_arxiv_request_started_at)
-        if delay > 0:
-            await asyncio.sleep(delay)
-        _last_arxiv_request_started_at = time.monotonic()
+def _search_arxiv_sync(query: str, max_results: int, sort_by: Any) -> List[Dict[str, Any]]:
+    search = arxiv.Search(
+        query=query,
+        max_results=max_results,
+        sort_by=sort_by,
+    )
+    return [_serialize_arxiv_result(result) for result in _get_arxiv_client().results(search)]
 
 
 def _retry_delay_seconds(response: Optional[Any], attempt: int) -> float:
@@ -120,64 +85,17 @@ async def _perform_request(
     params: Optional[Dict[str, Any]] = None,
     session: Optional[aiohttp.ClientSession] = None,
 ) -> Any:
-    if url.startswith(ARXIV_API_URL):
-        await _throttle_arxiv()
     assert session is not None
     return session.request(method, url, params=params)
-
-
-async def _request_text(
-    method: str,
-    url: str,
-    *,
-    params: Optional[Dict[str, Any]] = None,
-    session: Optional[aiohttp.ClientSession] = None,
-) -> str:
-    owns_session = session is None
-    if owns_session:
-        session = aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT, headers=_build_headers())
-
-    try:
-        assert session is not None
-        for attempt in range(DEFAULT_MAX_RETRIES + 1):
-            try:
-                async with await _perform_request(method, url, params=params, session=session) as response:
-                    body = await response.text()
-                    if response.status == 429 and attempt < DEFAULT_MAX_RETRIES:
-                        await asyncio.sleep(_retry_delay_seconds(response, attempt))
-                        continue
-                    if response.status >= 400:
-                        raise RuntimeError(f"HTTP {response.status}: {body}")
-                    return body
-            except (aiohttp.ClientError, asyncio.TimeoutError):
-                if attempt >= DEFAULT_MAX_RETRIES:
-                    raise
-                await asyncio.sleep(_retry_delay_seconds(None, attempt))
-    finally:
-        if owns_session and session is not None:
-            await session.close()
 
 
 async def search_arxiv_papers(
     query: str,
     max_results: int,
     sort_by: Any,
-    *,
-    session: Optional[aiohttp.ClientSession] = None,
 ) -> List[Dict[str, Any]]:
-    feed = await _request_text(
-        "GET",
-        ARXIV_API_URL,
-        params={
-            "search_query": query,
-            "start": 0,
-            "max_results": max_results,
-            "sortBy": _normalize_arxiv_sort(sort_by),
-            "sortOrder": "descending",
-        },
-        session=session,
-    )
-    return _parse_arxiv_feed(feed)
+    async with _arxiv_client_lock:
+        return await asyncio.to_thread(_search_arxiv_sync, query, max_results, sort_by)
 
 
 async def _request_json(
