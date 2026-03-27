@@ -35,6 +35,20 @@ pip install -r requirements.txt
 
 ## Configuration
 
+Copy `.env.example` to `.env` and adjust values as needed:
+
+```bash
+cp .env.example .env
+```
+
+Supported environment variables:
+
+- `AGENTIC_SYSTEM_PATH`: Base path used to create the `research-papers/` storage directory
+- `SEMANTIC_SCHOLAR_API_KEY`: Optional API key for higher Semantic Scholar rate limits
+- `RESEARCH_PAPER_HTTP_MAX_RETRIES`: Number of retries for transient upstream failures and `429` responses
+- `RESEARCH_PAPER_RETRY_DELAY_SECONDS`: Base backoff delay between retries
+- `ARXIV_MIN_INTERVAL_SECONDS`: Minimum delay between arXiv requests to reduce `429` responses
+
 Add to `~/.claude.json`:
 
 ```json

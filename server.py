@@ -31,18 +31,20 @@ import json
 import logging
 import os
 import re
-import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from urllib.parse import quote
 
-import aiohttp
 import arxiv
 from mcp.server.models import InitializationOptions
 from mcp.server import NotificationOptions, Server
 import mcp.server.stdio
 import mcp.types as types
+
+from env_loader import load_env_file
+
+load_env_file()
+
+from paper_clients import download_file, fetch_semantic_scholar_paper, search_arxiv_papers, search_semantic_scholar_papers
 
 
 # Configure logging
@@ -53,8 +55,6 @@ logging.basicConfig(
 logger = logging.getLogger("research-paper-mcp")
 
 # Configuration
-ARXIV_BASE_URL = "http://export.arxiv.org/api/query"
-SEMANTIC_SCHOLAR_BASE_URL = "https://api.semanticscholar.org/graph/v1"
 PAPERS_DIR = Path(os.environ.get("AGENTIC_SYSTEM_PATH", Path.home() / "agentic-system")) / "research-papers"
 PAPERS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -246,27 +246,7 @@ async def search_arxiv(args: Dict) -> List[types.TextContent]:
         }
         sort_by = sort_map.get(sort_by_str, arxiv.SortCriterion.Relevance)
 
-        # Search arXiv
-        search = arxiv.Search(
-            query=query,
-            max_results=max_results,
-            sort_by=sort_by
-        )
-
-        results = []
-        async for result in search.results():
-            paper_data = {
-                "id": result.entry_id.split("/")[-1],
-                "title": result.title,
-                "authors": [author.name for author in result.authors],
-                "abstract": result.summary,
-                "pdf_url": result.pdf_url,
-                "published": result.published.isoformat() if result.published else None,
-                "updated": result.updated.isoformat() if result.updated else None,
-                "categories": result.categories,
-                "primary_category": result.primary_category
-            }
-            results.append(paper_data)
+        results = await search_arxiv_papers(query, max_results, sort_by)
 
         logger.info(f"Found {len(results)} papers on arXiv")
 
@@ -300,33 +280,19 @@ async def search_semantic_scholar(args: Dict) -> List[types.TextContent]:
     logger.info(f"Searching Semantic Scholar for: {query} (limit={limit})")
 
     try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{SEMANTIC_SCHOLAR_BASE_URL}/paper/search"
-            params = {
+        papers = await search_semantic_scholar_papers(query, fields, limit)
+
+        logger.info(f"Found {len(papers)} papers on Semantic Scholar")
+
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "success": True,
                 "query": query,
-                "fields": ",".join(fields),
-                "limit": limit
-            }
-
-            async with session.get(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    papers = data.get("data", [])
-
-                    logger.info(f"Found {len(papers)} papers on Semantic Scholar")
-
-                    return [types.TextContent(
-                        type="text",
-                        text=json.dumps({
-                            "success": True,
-                            "query": query,
-                            "count": len(papers),
-                            "papers": papers
-                        }, indent=2)
-                    )]
-                else:
-                    error_text = await response.text()
-                    raise Exception(f"HTTP {response.status}: {error_text}")
+                "count": len(papers),
+                "papers": papers
+            }, indent=2)
+        )]
 
     except Exception as e:
         logger.error(f"Semantic Scholar search failed: {e}", exc_info=True)
@@ -351,27 +317,22 @@ async def download_paper(args: Dict) -> List[types.TextContent]:
         safe_id = re.sub(r'[^\w\-]', '_', paper_id)
         pdf_path = PAPERS_DIR / f"{safe_id}.pdf"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    content = await response.read()
+        content = await download_file(url)
 
-                    # Save PDF
-                    pdf_path.write_bytes(content)
+        # Save PDF
+        pdf_path.write_bytes(content)
 
-                    logger.info(f"Downloaded paper to {pdf_path}")
+        logger.info(f"Downloaded paper to {pdf_path}")
 
-                    return [types.TextContent(
-                        type="text",
-                        text=json.dumps({
-                            "success": True,
-                            "paper_id": paper_id,
-                            "file_path": str(pdf_path),
-                            "size_bytes": len(content)
-                        })
-                    )]
-                else:
-                    raise Exception(f"HTTP {response.status}")
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "success": True,
+                "paper_id": paper_id,
+                "file_path": str(pdf_path),
+                "size_bytes": len(content)
+            })
+        )]
 
     except Exception as e:
         logger.error(f"Paper download failed: {e}", exc_info=True)
@@ -444,36 +405,29 @@ async def analyze_citations(args: Dict) -> List[types.TextContent]:
     logger.info(f"Analyzing citations for {paper_id} (depth={depth})")
 
     try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{SEMANTIC_SCHOLAR_BASE_URL}/paper/{paper_id}"
-            params = {
-                "fields": "title,citationCount,influentialCitationCount,citations,references"
-            }
+        data = await fetch_semantic_scholar_paper(
+            paper_id,
+            ["title", "citationCount", "influentialCitationCount", "citations", "references"],
+        )
 
-            async with session.get(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
+        citation_graph = {
+            "paper_id": paper_id,
+            "title": data.get("title"),
+            "citation_count": data.get("citationCount", 0),
+            "influential_citations": data.get("influentialCitationCount", 0),
+            "citations": len(data.get("citations", [])),
+            "references": len(data.get("references", []))
+        }
 
-                    citation_graph = {
-                        "paper_id": paper_id,
-                        "title": data.get("title"),
-                        "citation_count": data.get("citationCount", 0),
-                        "influential_citations": data.get("influentialCitationCount", 0),
-                        "citations": len(data.get("citations", [])),
-                        "references": len(data.get("references", []))
-                    }
+        logger.info(f"Citation analysis complete: {citation_graph['citation_count']} citations")
 
-                    logger.info(f"Citation analysis complete: {citation_graph['citation_count']} citations")
-
-                    return [types.TextContent(
-                        type="text",
-                        text=json.dumps({
-                            "success": True,
-                            "citation_graph": citation_graph
-                        }, indent=2)
-                    )]
-                else:
-                    raise Exception(f"HTTP {response.status}")
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "success": True,
+                "citation_graph": citation_graph
+            }, indent=2)
+        )]
 
     except Exception as e:
         logger.error(f"Citation analysis failed: {e}", exc_info=True)

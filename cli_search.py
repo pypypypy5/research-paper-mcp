@@ -13,6 +13,10 @@ from pathlib import Path
 # Add server directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+from env_loader import load_env_file
+
+load_env_file()
+
 # Import MCP server functions
 try:
     import arxiv
