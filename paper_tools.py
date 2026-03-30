@@ -3,18 +3,117 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List
 
 import arxiv
 import mcp.types as types
 
-from paper_clients import download_file, fetch_semantic_scholar_paper, search_arxiv_papers, search_semantic_scholar_papers
+from paper_clients import (
+    download_file,
+    download_text,
+    fetch_semantic_scholar_paper,
+    search_arxiv_papers,
+    search_semantic_scholar_papers,
+)
 
 
 logger = logging.getLogger("research-paper-mcp")
 
 ToolHandler = Callable[[Dict[str, Any]], Awaitable[List[types.TextContent]]]
+HEADING_LEVELS = {f"h{level}": level for level in range(1, 7)}
+TEXT_TAGS = {"p", "li"}
+SECTION_ALIASES = {
+    "abstract": ["abstract"],
+    "introduction": ["introduction"],
+    "method": [
+        "method",
+        "methods",
+        "methodology",
+        "approach",
+        "approaches",
+        "materials and methods",
+        "method and materials",
+        "experimental setup",
+        "implementation details",
+    ],
+    "results": [
+        "results",
+        "experiments",
+        "experimental results",
+        "evaluation",
+        "evaluations",
+    ],
+    "conclusion": [
+        "conclusion",
+        "conclusions",
+        "discussion and conclusion",
+        "summary and conclusion",
+    ],
+}
+
+
+@dataclass
+class ParsedBlock:
+    kind: str
+    text: str
+    level: int = 0
+
+
+class _PaperHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.blocks: List[ParsedBlock] = []
+        self._captures: List[Dict[str, Any]] = []
+
+    def handle_starttag(self, tag: str, attrs: List[tuple[str, str | None]]) -> None:
+        attrs_dict = {key: value or "" for key, value in attrs}
+        classes = attrs_dict.get("class", "").lower()
+
+        if tag == "blockquote" and "abstract" in classes:
+            self._captures.append({"tag": tag, "kind": "abstract", "parts": []})
+            return
+
+        if tag in HEADING_LEVELS:
+            self._captures.append({"tag": tag, "kind": "heading", "level": HEADING_LEVELS[tag], "parts": []})
+            return
+
+        if tag in TEXT_TAGS and not self._is_inside_abstract():
+            self._captures.append({"tag": tag, "kind": "text", "parts": []})
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._captures:
+            return
+        current = self._captures[-1]
+        if current["tag"] != tag:
+            return
+
+        capture = self._captures.pop()
+        text = _clean_text("".join(capture["parts"]))
+        if not text:
+            return
+
+        if capture["kind"] == "heading":
+            self.blocks.append(ParsedBlock(kind="heading", text=text, level=capture["level"]))
+            return
+
+        if capture["kind"] == "abstract":
+            text = re.sub(r"^\s*abstract\s*:?\s*", "", text, flags=re.IGNORECASE)
+            self.blocks.append(ParsedBlock(kind="heading", text="Abstract", level=1))
+            if text:
+                self.blocks.append(ParsedBlock(kind="text", text=text))
+            return
+
+        self.blocks.append(ParsedBlock(kind="text", text=text))
+
+    def handle_data(self, data: str) -> None:
+        if self._captures:
+            self._captures[-1]["parts"].append(data)
+
+    def _is_inside_abstract(self) -> bool:
+        return any(capture["kind"] == "abstract" for capture in self._captures)
 
 
 def _json_response(payload: Dict[str, Any], *, indent: int | None = None) -> List[types.TextContent]:
@@ -40,6 +139,109 @@ def _get_sort_criterion(sort_by_str: str) -> arxiv.SortCriterion:
     return sort_map.get(sort_by_str, arxiv.SortCriterion.Relevance)
 
 
+def _clean_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _normalize_paper_id(paper_id: str) -> str:
+    normalized = paper_id.strip()
+    if normalized.lower().startswith("arxiv:"):
+        normalized = normalized.split(":", 1)[1]
+    return normalized
+
+
+def _normalize_heading_title(title: str) -> str:
+    normalized = _clean_text(title)
+    normalized = re.sub(r"^(?:section\s+)?[\divxlcIVXLC]+(?:\.[\divxlcIVXLC]+)*[\s.:_-]+", "", normalized)
+    normalized = re.sub(r"^[\d.]+[\s.:_-]+", "", normalized)
+    normalized = re.sub(r"[^a-z0-9 ]+", " ", normalized.lower())
+    return _clean_text(normalized)
+
+
+def _build_arxiv_section_urls(paper_id: str) -> List[str]:
+    normalized = _normalize_paper_id(paper_id)
+    return [
+        f"https://ar5iv.labs.arxiv.org/html/{normalized}",
+        f"https://arxiv.org/html/{normalized}",
+        f"https://arxiv.org/abs/{normalized}",
+    ]
+
+
+def _match_requested_heading(requested_section: str, heading_title: str) -> bool:
+    request = _normalize_heading_title(requested_section)
+    heading = _normalize_heading_title(heading_title)
+    aliases = SECTION_ALIASES.get(request, [request])
+    for alias in aliases:
+        alias_normalized = _normalize_heading_title(alias)
+        if heading == alias_normalized or heading.startswith(f"{alias_normalized} "):
+            return True
+        if alias_normalized in heading and len(alias_normalized.split()) > 1:
+            return True
+    return False
+
+
+def _parse_html_blocks(html: str) -> List[ParsedBlock]:
+    stripped = re.sub(r"<(script|style)\b.*?</\1>", "", html, flags=re.IGNORECASE | re.DOTALL)
+    parser = _PaperHTMLParser()
+    parser.feed(stripped)
+    parser.close()
+    return parser.blocks
+
+
+def _extract_requested_sections_from_html(html: str, requested_sections: List[str]) -> Dict[str, str]:
+    blocks = _parse_html_blocks(html)
+    extracted: Dict[str, str] = {}
+
+    for requested in requested_sections:
+        match_index = None
+        for index, block in enumerate(blocks):
+            if block.kind != "heading":
+                continue
+            if _match_requested_heading(requested, block.text):
+                match_index = index
+                break
+
+        if match_index is None:
+            continue
+
+        heading = blocks[match_index]
+        section_chunks: List[str] = []
+        for block in blocks[match_index + 1 :]:
+            if block.kind == "heading" and block.level <= heading.level:
+                break
+            if block.kind == "text":
+                section_chunks.append(block.text)
+
+        section_text = "\n\n".join(chunk for chunk in section_chunks if chunk)
+        if section_text:
+            extracted[requested] = section_text
+
+    return extracted
+
+
+async def _fetch_arxiv_sections(paper_id: str, requested_sections: List[str]) -> tuple[Dict[str, str], List[str]]:
+    remaining = list(requested_sections)
+    extracted: Dict[str, str] = {}
+    urls_tried: List[str] = []
+
+    for url in _build_arxiv_section_urls(paper_id):
+        if not remaining:
+            break
+
+        try:
+            html = await download_text(url)
+        except Exception as error:
+            logger.info("Unable to fetch arXiv HTML from %s: %s", url, error)
+            continue
+
+        urls_tried.append(url)
+        found = _extract_requested_sections_from_html(html, remaining)
+        extracted.update(found)
+        remaining = [section for section in remaining if section not in extracted]
+
+    return extracted, urls_tried
+
+
 async def search_arxiv(args: Dict[str, Any]) -> List[types.TextContent]:
     query = args.get("query", "")
     max_results = args.get("max_results", 10)
@@ -61,6 +263,37 @@ async def search_arxiv(args: Dict[str, Any]) -> List[types.TextContent]:
         )
     except Exception as error:
         logger.error("arXiv search failed: %s", error, exc_info=True)
+        return _error_response(error)
+
+
+async def get_arxiv_sections(args: Dict[str, Any]) -> List[types.TextContent]:
+    paper_id = _normalize_paper_id(args.get("paper_id", ""))
+    requested_sections = [str(section).strip() for section in args.get("sections", []) if str(section).strip()]
+
+    logger.info("Fetching arXiv sections for %s: %s", paper_id, requested_sections)
+
+    try:
+        extracted, urls_tried = await _fetch_arxiv_sections(paper_id, requested_sections)
+        missing_sections = [section for section in requested_sections if section not in extracted]
+
+        logger.info(
+            "Fetched %s/%s requested sections for %s",
+            len(extracted),
+            len(requested_sections),
+            paper_id,
+        )
+        return _json_response(
+            {
+                "success": True,
+                "paper_id": paper_id,
+                "sections": extracted,
+                "missing_sections": missing_sections,
+                "source_urls_tried": urls_tried,
+            },
+            indent=2,
+        )
+    except Exception as error:
+        logger.error("arXiv section fetch failed: %s", error, exc_info=True)
         return _error_response(error)
 
 
@@ -274,6 +507,25 @@ TOOL_DEFINITIONS = [
         },
     ),
     types.Tool(
+        name="get_arxiv_sections",
+        description="Fetch only the requested sections from a specific arXiv paper, such as abstract or method.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "paper_id": {
+                    "type": "string",
+                    "description": "arXiv paper identifier, with or without the arXiv: prefix.",
+                },
+                "sections": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Section names to extract, for example ['abstract', 'method']",
+                },
+            },
+            "required": ["paper_id", "sections"],
+        },
+    ),
+    types.Tool(
         name="download_paper",
         description="Download research paper PDF from URL. Saves to local storage and returns file path.",
         inputSchema={
@@ -359,6 +611,7 @@ TOOL_DEFINITIONS = [
 TOOL_HANDLERS: Dict[str, ToolHandler] = {
     "search_arxiv": search_arxiv,
     "search_semantic_scholar": search_semantic_scholar,
+    "get_arxiv_sections": get_arxiv_sections,
     "download_paper": download_paper,
     "extract_insights": extract_insights,
     "analyze_citations": analyze_citations,

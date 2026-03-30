@@ -162,6 +162,37 @@ async def _request_bytes(
             await session.close()
 
 
+async def _request_text(
+    method: str,
+    url: str,
+    *,
+    session: Optional[aiohttp.ClientSession] = None,
+) -> str:
+    owns_session = session is None
+    if owns_session:
+        session = aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT, headers=_build_headers())
+
+    try:
+        assert session is not None
+        for attempt in range(DEFAULT_MAX_RETRIES + 1):
+            try:
+                async with await _perform_request(method, url, session=session) as response:
+                    body = await response.text()
+                    if response.status == 429 and attempt < DEFAULT_MAX_RETRIES:
+                        await asyncio.sleep(_retry_delay_seconds(response, attempt))
+                        continue
+                    if response.status >= 400:
+                        raise RuntimeError(f"HTTP {response.status}: {body}")
+                    return body
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                if attempt >= DEFAULT_MAX_RETRIES:
+                    raise
+                await asyncio.sleep(_retry_delay_seconds(None, attempt))
+    finally:
+        if owns_session and session is not None:
+            await session.close()
+
+
 async def search_semantic_scholar_papers(
     query: str,
     fields: Iterable[str],
@@ -199,3 +230,7 @@ async def fetch_semantic_scholar_paper(
 
 async def download_file(url: str, *, session: Optional[aiohttp.ClientSession] = None) -> bytes:
     return await _request_bytes("GET", url, session=session)
+
+
+async def download_text(url: str, *, session: Optional[aiohttp.ClientSession] = None) -> str:
+    return await _request_text("GET", url, session=session)

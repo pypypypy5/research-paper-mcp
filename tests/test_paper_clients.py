@@ -152,6 +152,13 @@ class PaperClientsAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(content, b"%PDF-1.7")
 
+    async def test_download_text_returns_text(self):
+        session = FakeSession(FakeResponse(status=200, text_data="<html><body>ok</body></html>"))
+
+        content = await paper_clients.download_text("https://example.com/paper.html", session=session)
+
+        self.assertEqual(content, "<html><body>ok</body></html>")
+
     @patch.dict("os.environ", {"SEMANTIC_SCHOLAR_API_KEY": "secret-key"}, clear=False)
     def test_build_headers_includes_semantic_scholar_api_key(self):
         headers = paper_clients._build_headers()
