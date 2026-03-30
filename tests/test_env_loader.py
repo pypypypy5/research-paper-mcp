@@ -22,7 +22,7 @@ class EnvLoaderTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch.dict(os.environ, {"SEMANTIC_SCHOLAR_API_KEY": "from-env"}, clear=False):
+            with patch.dict(os.environ, {"SEMANTIC_SCHOLAR_API_KEY": "from-env"}, clear=True):
                 load_env_file(env_path)
                 self.assertEqual(os.environ["SEMANTIC_SCHOLAR_API_KEY"], "from-env")
                 self.assertEqual(os.environ["ARXIV_MIN_INTERVAL_SECONDS"], "7")
