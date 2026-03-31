@@ -28,6 +28,26 @@ TEXT_TAGS = {"p", "li"}
 SECTION_ALIASES = {
     "abstract": ["abstract"],
     "introduction": ["introduction"],
+    "related work": [
+        "related work",
+        "related works",
+        "background and related work",
+        "background and related works",
+        "previous work",
+        "previous works",
+        "prior work",
+        "prior works",
+    ],
+    "related works": [
+        "related work",
+        "related works",
+        "background and related work",
+        "background and related works",
+        "previous work",
+        "previous works",
+        "prior work",
+        "prior works",
+    ],
     "method": [
         "method",
         "methods",
@@ -161,8 +181,8 @@ def _normalize_heading_title(title: str) -> str:
 def _build_arxiv_section_urls(paper_id: str) -> List[str]:
     normalized = _normalize_paper_id(paper_id)
     return [
-        f"https://ar5iv.labs.arxiv.org/html/{normalized}",
         f"https://arxiv.org/html/{normalized}",
+        f"https://ar5iv.labs.arxiv.org/html/{normalized}",
         f"https://arxiv.org/abs/{normalized}",
     ]
 

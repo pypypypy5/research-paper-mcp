@@ -39,6 +39,18 @@ ABS_PAGE_HTML = """
 
 
 class PaperToolSectionParsingTests(unittest.TestCase):
+    def test_build_arxiv_section_urls_prefers_official_html_before_fallbacks(self):
+        urls = paper_tools._build_arxiv_section_urls("arXiv:1234.5678")
+
+        self.assertEqual(
+            urls,
+            [
+                "https://arxiv.org/html/1234.5678",
+                "https://ar5iv.labs.arxiv.org/html/1234.5678",
+                "https://arxiv.org/abs/1234.5678",
+            ],
+        )
+
     def test_extract_requested_sections_from_html_returns_only_requested_text(self):
         sections = paper_tools._extract_requested_sections_from_html(SAMPLE_ARXIV_HTML, ["abstract", "method"])
 
@@ -61,6 +73,26 @@ class PaperToolSectionParsingTests(unittest.TestCase):
         sections = paper_tools._extract_requested_sections_from_html(html, ["method"])
 
         self.assertEqual(sections["method"], "We optimize the planner with iterative rollouts.")
+
+    def test_extract_requested_sections_matches_related_works_plural_and_singular(self):
+        html = """
+        <html><body>
+          <section>
+            <h2>6 Related Work</h2>
+            <p>We compare against prior prompting and planning frameworks.</p>
+          </section>
+          <section>
+            <h2>7 Conclusion</h2>
+            <p>Closing remarks.</p>
+          </section>
+        </body></html>
+        """
+
+        sections = paper_tools._extract_requested_sections_from_html(html, ["related work", "related works"])
+
+        expected = "We compare against prior prompting and planning frameworks."
+        self.assertEqual(sections["related work"], expected)
+        self.assertEqual(sections["related works"], expected)
 
 
 class PaperToolAsyncTests(unittest.IsolatedAsyncioTestCase):
@@ -93,6 +125,30 @@ class PaperToolAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["sections"], {"abstract": "We show a direct abstract fallback from the arXiv abs page."})
         self.assertEqual(payload["missing_sections"], [])
         self.assertEqual(payload["source_urls_tried"], ["https://arxiv.org/abs/1234.5678"])
+
+    async def test_get_arxiv_sections_supports_related_works_request_for_related_work_heading(self):
+        html = """
+        <html><body>
+          <section>
+            <h2>5 Related Work</h2>
+            <p>We compare against prior prompting and planning frameworks.</p>
+          </section>
+          <section>
+            <h2>6 Conclusion</h2>
+            <p>Closing remarks.</p>
+          </section>
+        </body></html>
+        """
+
+        with patch("paper_tools.download_text", new=AsyncMock(return_value=html)):
+            response = await paper_tools.get_arxiv_sections({"paper_id": "1234.5678", "sections": ["related works"]})
+
+        payload = json.loads(response[0].text)
+        self.assertEqual(
+            payload["sections"]["related works"],
+            "We compare against prior prompting and planning frameworks.",
+        )
+        self.assertEqual(payload["missing_sections"], [])
 
 
 if __name__ == "__main__":
