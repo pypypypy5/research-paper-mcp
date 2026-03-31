@@ -21,6 +21,7 @@ from paper_tools import (
     call_tool,
     download_paper,
     extract_insights,
+    get_arxiv_full_text,
     get_arxiv_sections,
     search_arxiv,
     search_semantic_scholar,

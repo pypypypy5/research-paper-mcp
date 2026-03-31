@@ -26,6 +26,7 @@ ToolHandler = Callable[[Dict[str, Any]], Awaitable[List[types.TextContent]]]
 HEADING_LEVELS = {f"h{level}": level for level in range(1, 7)}
 TEXT_TAGS = {"p", "li"}
 IGNORED_CAPTURE_TAGS = {"math", "annotation", "semantics", "mrow", "mi", "mn", "mo", "msub", "msup", "msubsup"}
+IGNORED_FULL_TEXT_HEADINGS = {"report github issue", "instructions for reporting errors"}
 SECTION_ALIASES = {
     "abstract": ["abstract"],
     "introduction": ["introduction"],
@@ -263,6 +264,16 @@ def _extract_requested_sections_from_html(html: str, requested_sections: List[st
     return extracted
 
 
+def _extract_full_text_from_html(html: str) -> str:
+    chunks: List[str] = []
+    for block in _parse_html_blocks(html):
+        if block.kind == "heading" and _normalize_heading_title(block.text) in IGNORED_FULL_TEXT_HEADINGS:
+            continue
+        if block.kind in {"heading", "text"}:
+            chunks.append(block.text)
+    return "\n\n".join(chunk for chunk in chunks if chunk)
+
+
 async def _fetch_arxiv_sections(paper_id: str, requested_sections: List[str]) -> tuple[Dict[str, str], List[str]]:
     remaining = list(requested_sections)
     extracted: Dict[str, str] = {}
@@ -284,6 +295,21 @@ async def _fetch_arxiv_sections(paper_id: str, requested_sections: List[str]) ->
         remaining = [section for section in remaining if section not in extracted]
 
     return extracted, urls_tried
+
+
+async def _fetch_arxiv_full_text(paper_id: str) -> tuple[str, str]:
+    for url in _build_arxiv_section_urls(paper_id):
+        try:
+            html = await download_text(url)
+        except Exception as error:
+            logger.info("Unable to fetch arXiv full text HTML from %s: %s", url, error)
+            continue
+
+        full_text = _extract_full_text_from_html(html)
+        if full_text:
+            return full_text, url
+
+    raise RuntimeError(f"Unable to fetch full text for arXiv paper {paper_id}")
 
 
 async def search_arxiv(args: Dict[str, Any]) -> List[types.TextContent]:
@@ -338,6 +364,28 @@ async def get_arxiv_sections(args: Dict[str, Any]) -> List[types.TextContent]:
         )
     except Exception as error:
         logger.error("arXiv section fetch failed: %s", error, exc_info=True)
+        return _error_response(error)
+
+
+async def get_arxiv_full_text(args: Dict[str, Any]) -> List[types.TextContent]:
+    paper_id = _normalize_paper_id(args.get("paper_id", ""))
+
+    logger.info("Fetching arXiv full text for %s", paper_id)
+
+    try:
+        full_text, source_url = await _fetch_arxiv_full_text(paper_id)
+        logger.info("Fetched arXiv full text for %s from %s", paper_id, source_url)
+        return _json_response(
+            {
+                "success": True,
+                "paper_id": paper_id,
+                "full_text": full_text,
+                "source_url": source_url,
+            },
+            indent=2,
+        )
+    except Exception as error:
+        logger.error("arXiv full text fetch failed: %s", error, exc_info=True)
         return _error_response(error)
 
 
@@ -570,6 +618,20 @@ TOOL_DEFINITIONS = [
         },
     ),
     types.Tool(
+        name="get_arxiv_full_text",
+        description="Fetch the full text of a specific arXiv paper as parsed plain text.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "paper_id": {
+                    "type": "string",
+                    "description": "arXiv paper identifier, with or without the arXiv: prefix.",
+                },
+            },
+            "required": ["paper_id"],
+        },
+    ),
+    types.Tool(
         name="download_paper",
         description="Download research paper PDF from URL. Saves to local storage and returns file path.",
         inputSchema={
@@ -656,6 +718,7 @@ TOOL_HANDLERS: Dict[str, ToolHandler] = {
     "search_arxiv": search_arxiv,
     "search_semantic_scholar": search_semantic_scholar,
     "get_arxiv_sections": get_arxiv_sections,
+    "get_arxiv_full_text": get_arxiv_full_text,
     "download_paper": download_paper,
     "extract_insights": extract_insights,
     "analyze_citations": analyze_citations,

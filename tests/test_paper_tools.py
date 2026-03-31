@@ -113,6 +113,29 @@ class PaperToolSectionParsingTests(unittest.TestCase):
         self.assertEqual(sections["related work"], expected)
         self.assertEqual(sections["related works"], expected)
 
+    def test_extract_full_text_from_html_keeps_headings_and_body_text(self):
+        html = """
+        <html><body>
+          <h1>Sample Paper</h1>
+          <section>
+            <h2>Abstract</h2>
+            <p>We propose a compact transformer variant for long-context reasoning.</p>
+          </section>
+          <section>
+            <h2>2 Our Method</h2>
+            <p>Our method combines grouped-query attention with sparse routing.</p>
+          </section>
+        </body></html>
+        """
+
+        full_text = paper_tools._extract_full_text_from_html(html)
+
+        self.assertIn("Sample Paper", full_text)
+        self.assertIn("Abstract", full_text)
+        self.assertIn("We propose a compact transformer variant", full_text)
+        self.assertIn("2 Our Method", full_text)
+        self.assertIn("Our method combines grouped-query attention", full_text)
+
 
 class PaperToolAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_get_arxiv_sections_returns_only_requested_sections(self):
@@ -168,6 +191,32 @@ class PaperToolAsyncTests(unittest.IsolatedAsyncioTestCase):
             "We compare against prior prompting and planning frameworks.",
         )
         self.assertEqual(payload["missing_sections"], [])
+
+    async def test_get_arxiv_full_text_returns_parsed_text_and_source_url(self):
+        html = """
+        <html><body>
+          <h1>Sample Paper</h1>
+          <section>
+            <h2>Abstract</h2>
+            <p>We propose a compact transformer variant for long-context reasoning.</p>
+          </section>
+          <section>
+            <h2>2 Our Method</h2>
+            <p>Our method combines grouped-query attention with sparse routing.</p>
+          </section>
+        </body></html>
+        """
+
+        with patch("paper_tools.download_text", new=AsyncMock(return_value=html)):
+            response = await paper_tools.get_arxiv_full_text({"paper_id": "arXiv:1234.5678"})
+
+        payload = json.loads(response[0].text)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["paper_id"], "1234.5678")
+        self.assertEqual(payload["source_url"], "https://arxiv.org/html/1234.5678")
+        self.assertIn("Sample Paper", payload["full_text"])
+        self.assertIn("Abstract", payload["full_text"])
+        self.assertIn("Our method combines grouped-query attention", payload["full_text"])
 
 
 if __name__ == "__main__":
