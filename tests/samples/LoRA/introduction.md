@@ -1,21 +1,48 @@
-Recurrent neural networks, long short-term memory [13] and gated recurrent [7] neural networks
-in particular, have been firmly established as state of the art approaches in sequence modeling and
-transduction problems such as language modeling and machine translation [ 35 , 2 , 5]. Numerous
-efforts have since continued to push the boundaries of recurrent language models and encoder-decoder
-architectures [38, 24, 15].
-Recurrent models typically factor computation along the symbol positions of the input and output
-sequences. Aligning the positions to steps in computation time, they generate a sequence of hidden
-states ht, as a function of the previous hidden state ht−1 and the input for position t. This inherently
-sequential nature precludes parallelization within training examples, which becomes critical at longer
-sequence lengths, as memory constraints limit batching across examples. Recent work has achieved
-significant improvements in computational efficiency through factorization tricks [ 21 ] and conditional
-computation [ 32 ], while also improving model performance in case of the latter. The fundamental
-constraint of sequential computation, however, remains.
-Attention mechanisms have become an integral part of compelling sequence modeling and transduc-
-tion models in various tasks, allowing modeling of dependencies without regard to their distance in
-the input or output sequences [ 2, 19 ]. In all but a few cases [ 27 ], however, such attention mechanisms
-are used in conjunction with a recurrent network.
-In this work we propose the Transformer, a model architecture eschewing recurrence and instead
-relying entirely on an attention mechanism to draw global dependencies between input and output.
-The Transformer allows for significantly more parallelization and can reach a new state of the art in
-translation quality after being trained for as little as twelve hours on eight P100 GPUs.
+Many applications in natural language processing rely on adapt-
+ing one large-scale, pre-trained language model to multiple down-
+stream applications. Such adaptation is usually done via fine-tuning,
+which updates all the parameters of the pre-trained model. The ma-
+jor downside of fine-tuning is that the new model contains as many
+parameters as in the original model. As larger models are trained
+every few months, this changes from a mere “inconvenience” for
+GPT-2 (Radford et al., b) or RoBERTa large (Liu et al., 2019) to a
+critical deployment challenge for GPT-3 (Brown et al., 2020) with
+175 billion trainable parameters.1
+Many sought to mitigate this by adapting only some parameters or
+learning external modules for new tasks. This way, we only need
+to store and load a small number of task-specific parameters in ad-
+dition to the pre-trained model for each task, greatly boosting the
+operational efficiency when deployed. However, existing techniques often introduce inference latency (Houlsby et al., 2019; Rebuffi et al., 2017) by extending model
+depth or reduce the model’s usable sequence length (Li & Liang, 2021; Lester et al., 2021; Ham-
+bardzumyan et al., 2020; Liu et al., 2021) (Section 3). More importantly, these method often fail to
+match the fine-tuning baselines, posing a trade-off between efficiency and model quality.
+We take inspiration from Li et al. (2018a); Aghajanyan et al. (2020) which show that the learned
+over-parametrized models in fact reside on a low intrinsic dimension. We hypothesize that the
+change in weights during model adaptation also has a low “intrinsic rank”, leading to our proposed
+Low-Rank Adaptation (LoRA) approach. LoRA allows us to train some dense layers in a neural
+network indirectly by optimizing rank decomposition matrices of the dense layers’ change during
+adaptation instead, while keeping the pre-trained weights frozen, as shown in Figure 1. Using GPT-3
+175B as an example, we show that a very low rank (i.e., r in Figure 1 can be one or two) suffices even
+when the full rank (i.e., d) is as high as 12,288, making LoRA both storage- and compute-efficient.
+LoRA possesses several key advantages.
+• A pre-trained model can be shared and used to build many small LoRA modules for dif-
+ferent tasks. We can freeze the shared model and efficiently switch tasks by replacing the
+matrices A and B in Figure 1, reducing the storage requirement and task-switching over-
+head significantly.
+• LoRA makes training more efficient and lowers the hardware barrier to entry by up to 3
+times when using adaptive optimizers since we do not need to calculate the gradients or
+maintain the optimizer states for most parameters. Instead, we only optimize the injected,
+much smaller low-rank matrices.
+• Our simple linear design allows us to merge the trainable matrices with the frozen weights
+when deployed, introducing no inference latency compared to a fully fine-tuned model, by
+construction.
+• LoRA is orthogonal to many prior methods and can be combined with many of them, such
+as prefix-tuning. We provide an example in Appendix E.
+Terminologies and Conventions We make frequent references to the Transformer architecture
+and use the conventional terminologies for its dimensions. We call the input and output di-
+mension size of a Transformer layer dmodel. We use Wq , Wk, Wv , and Wo to refer to the
+query/key/value/output projection matrices in the self-attention module. W or W0 refers to a pre-
+trained weight matrix and ∆W its accumulated gradient update during adaptation. We use r to
+denote the rank of a LoRA module. We follow the conventions set out by (Vaswani et al., 2017;
+Brown et al., 2020) and use Adam (Loshchilov & Hutter, 2019; Kingma & Ba, 2017) for model
+optimization and use a Transformer MLP feedforward dimension df f n = 4 × dmodel.
