@@ -74,6 +74,25 @@ class PaperToolSectionParsingTests(unittest.TestCase):
 
         self.assertEqual(sections["method"], "We optimize the planner with iterative rollouts.")
 
+    def test_extract_requested_sections_matches_our_method_and_empirical_experiments(self):
+        html = """
+        <html><body>
+          <section>
+            <h2>4 Our Method</h2>
+            <p>We describe the simple design of LoRA and its practical benefits.</p>
+          </section>
+          <section>
+            <h2>5 Empirical Experiments</h2>
+            <p>We evaluate the downstream task performance of LoRA.</p>
+          </section>
+        </body></html>
+        """
+
+        sections = paper_tools._extract_requested_sections_from_html(html, ["method", "experiments"])
+
+        self.assertEqual(sections["method"], "We describe the simple design of LoRA and its practical benefits.")
+        self.assertEqual(sections["experiments"], "We evaluate the downstream task performance of LoRA.")
+
     def test_extract_requested_sections_matches_related_works_plural_and_singular(self):
         html = """
         <html><body>

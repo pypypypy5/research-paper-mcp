@@ -25,6 +25,7 @@ logger = logging.getLogger("research-paper-mcp")
 ToolHandler = Callable[[Dict[str, Any]], Awaitable[List[types.TextContent]]]
 HEADING_LEVELS = {f"h{level}": level for level in range(1, 7)}
 TEXT_TAGS = {"p", "li"}
+IGNORED_CAPTURE_TAGS = {"math", "annotation", "semantics", "mrow", "mi", "mn", "mo", "msub", "msup", "msubsup"}
 SECTION_ALIASES = {
     "abstract": ["abstract"],
     "introduction": ["introduction"],
@@ -51,6 +52,8 @@ SECTION_ALIASES = {
     "method": [
         "method",
         "methods",
+        "our method",
+        "our methods",
         "methodology",
         "approach",
         "approaches",
@@ -58,6 +61,14 @@ SECTION_ALIASES = {
         "method and materials",
         "experimental setup",
         "implementation details",
+    ],
+    "experiments": [
+        "experiments",
+        "experiment",
+        "empirical experiments",
+        "experimental results",
+        "evaluation",
+        "evaluations",
     ],
     "results": [
         "results",
@@ -92,6 +103,14 @@ class _PaperHTMLParser(HTMLParser):
         attrs_dict = {key: value or "" for key, value in attrs}
         classes = attrs_dict.get("class", "").lower()
 
+        if tag in IGNORED_CAPTURE_TAGS:
+            self._captures.append({"tag": tag, "kind": "ignore", "parts": []})
+            return
+
+        if tag == "sup" or "ltx_note_mark" in classes:
+            self._captures.append({"tag": tag, "kind": "ignore", "parts": []})
+            return
+
         if tag == "blockquote" and "abstract" in classes:
             self._captures.append({"tag": tag, "kind": "abstract", "parts": []})
             return
@@ -117,6 +136,9 @@ class _PaperHTMLParser(HTMLParser):
 
         if capture["kind"] == "heading":
             self.blocks.append(ParsedBlock(kind="heading", text=text, level=capture["level"]))
+            return
+
+        if capture["kind"] == "ignore":
             return
 
         if capture["kind"] == "abstract":
@@ -160,6 +182,8 @@ def _get_sort_criterion(sort_by_str: str) -> arxiv.SortCriterion:
 
 
 def _clean_text(value: str) -> str:
+    value = re.sub(r"\b(\w+)_\{\1\}", r"\1", value)
+    value = re.sub(r"\b([A-Za-z])\1\b", r"\1", value)
     return re.sub(r"\s+", " ", value).strip()
 
 
